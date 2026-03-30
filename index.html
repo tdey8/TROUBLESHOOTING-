@@ -1,1 +1,684 @@
+[12:13 AM, 3/30/2026] Siddharth: <!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Issue Explorer | Excel Issue Dashboard</title>
+  <meta name="description" content="Upload an Excel workbook, scan every sheet, and explore extracted issue records in a polished client-side dashboard." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
 
+  <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script defer src=…
+[12:13 AM, 3/30/2026] Siddharth: const TARGET_FIELDS = [
+  "Title",
+  "Issue Summary",
+  "Observations",
+  "Actions Taken",
+  "Root Cause",
+  "Preventive Action"
+];
+
+const NORMALIZED_TARGET_MAP = Object.fromEntries(
+  TARGET_FIELDS.map((field) => [normalizeHeader(field), field])
+);
+
+const state = {
+  workbookName: "",
+  workbookSize: 0,
+  allRecords: [],
+  filteredRecords: [],
+  sheetSummaries: [],
+  selectedRecordId: null,
+  totalSheetsScanned: 0,
+  matchedSheetsCount: 0
+};
+
+const fileInput = document.getElementById("fileInput");
+const browseBtn = document.getElementById("browseBtn");
+const dropZone = document.getElementById("dropZone");
+const statusMessage = document.getElementById("statusMessage");
+const fileMeta = document.getElementById("fileMeta");
+
+const searchInput = document.getElementById("searchInput");
+const sheetFilter = document.getElementById("sheetFilter");
+const resetFiltersBtn = document.getElementById("resetFiltersBtn");
+const exportJsonBtn = document.getElementById("exportJsonBtn");
+
+const metricSheetsScanned = document.getElementById("metricSheetsScanned");
+const metricMatchedSheets = document.getElementById("metricMatchedSheets");
+const metricRecordsExtracted = document.getElementById("metricRecordsExtracted");
+const metricAvgCompleteness = document.getElementById("metricAvgCompleteness");
+
+const recordsCountText = document.getElementById("recordsCountText");
+const resultsList = document.getElementById("resultsList");
+const detailTitle = document.getElementById("detailTitle");
+const detailMeta = document.getElementById("detailMeta");
+const detailFields = document.getElementById("detailFields");
+const copyRecordBtn = document.getElementById("copyRecordBtn");
+
+const preUploadEmptyState = document.getElementById("preUploadEmptyState");
+const noMatchesEmptyState = document.getElementById("noMatchesEmptyState");
+const noFilteredResultsState = document.getElementById("noFilteredResultsState");
+const sheetSummaryPanelEmpty = document.getElementById("sheetSummaryPanelEmpty");
+
+const sheetSummaryList = document.getElementById("sheetSummaryList");
+const sheetSummaryCount = document.getElementById("sheetSummaryCount");
+
+browseBtn.addEventListener("click", () => fileInput.click());
+
+dropZone.addEventListener("click", (event) => {
+  if (event.target !== browseBtn) {
+    fileInput.click();
+  }
+});
+
+dropZone.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    fileInput.click();
+  }
+});
+
+fileInput.addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (file) {
+    await handleWorkbookFile(file);
+  }
+});
+
+dropZone.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  dropZone.classList.add("is-dragover");
+});
+
+dropZone.addEventListener("dragleave", () => {
+  dropZone.classList.remove("is-dragover");
+});
+
+dropZone.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  dropZone.classList.remove("is-dragover");
+  const file = event.dataTransfer?.files?.[0];
+  if (file) {
+    await handleWorkbookFile(file);
+  }
+});
+
+searchInput.addEventListener("input", applyFiltersAndRender);
+sheetFilter.addEventListener("change", applyFiltersAndRender);
+
+resetFiltersBtn.addEventListener("click", () => {
+  searchInput.value = "";
+  sheetFilter.value = "all";
+  applyFiltersAndRender();
+});
+
+exportJsonBtn.addEventListener("click", exportFilteredResultsAsJson);
+copyRecordBtn.addEventListener("click", copySelectedRecord);
+
+function normalizeHeader(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function cleanCellValue(value) {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+}
+
+function isMeaningfulValue(value) {
+  return cleanCellValue(value) !== "";
+}
+
+function formatBytes(bytes) {
+  if (!bytes && bytes !== 0) return "";
+  if (bytes < 1024) return ${bytes} B;
+  if (bytes < 1024 * 1024) return ${(bytes / 1024).toFixed(1)} KB;
+  return ${(bytes / (1024 * 1024)).toFixed(2)} MB;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+async function handleWorkbookFile(file) {
+  const supportedExtensions = [".xlsx", ".xls", ".xlsm", ".csv"];
+  const fileNameLower = file.name.toLowerCase();
+
+  const isSupported = supportedExtensions.some((ext) => fileNameLower.endsWith(ext));
+  if (!isSupported) {
+    setStatus("Unsupported file type. Please upload .xlsx, .xls, .xlsm, or .csv.", "error");
+    return;
+  }
+
+  setStatus("Reading workbook...", "loading");
+  fileMeta.textContent = ${file.name} • ${formatBytes(file.size)};
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+
+    const workbook = XLSX.read(arrayBuffer, {
+      type: "array",
+      cellDates: true
+    });
+
+    state.workbookName = file.name;
+    state.workbookSize = file.size;
+
+    parseWorkbook(workbook);
+    setStatus("Workbook processed successfully.", "success");
+  } catch (error) {
+    console.error(error);
+    resetDataState();
+    setStatus("The file could not be read. Please check that it is a valid spreadsheet.", "error");
+  }
+}
+
+function setStatus(message, type = "default") {
+  statusMessage.textContent = message;
+  statusMessage.dataset.type = type;
+}
+
+function parseWorkbook(workbook) {
+  resetDataState(false);
+
+  const sheetNames = workbook.SheetNames || [];
+  state.totalSheetsScanned = sheetNames.length;
+
+  const sheetSummaries = [];
+  const extractedRecords = [];
+
+  sheetNames.forEach((sheetName) => {
+    const worksheet = workbook.Sheets[sheetName];
+
+    const rows = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+      raw: false
+    });
+
+    const sheetSummary = analyzeSheet(sheetName, rows);
+    sheetSummaries.push(sheetSummary);
+
+    if (sheetSummary.matched) {
+      extractedRecords.push(...sheetSummary.records);
+    }
+  });
+
+  state.sheetSummaries = sheetSummaries;
+  state.matchedSheetsCount = sheetSummaries.filter((sheet) => sheet.matched).length;
+  state.allRecords = extractedRecords;
+  state.filteredRecords = [...extractedRecords];
+  state.selectedRecordId = extractedRecords[0]?.id ?? null;
+
+  populateSheetFilterOptions();
+  applyFiltersAndRender();
+}
+
+function analyzeSheet(sheetName, rows) {
+  let bestHeaderRowIndex = -1;
+  let bestMatchCount = 0;
+  let bestColumnMap = {};
+  let bestMatchedFields = [];
+
+  rows.forEach((row, rowIndex) => {
+    const columnMap = {};
+    const matchedFields = [];
+
+    row.forEach((cellValue, colIndex) => {
+      const normalized = normalizeHeader(cellValue);
+      const matchedTarget = NORMALIZED_TARGET_MAP[normalized];
+
+      if (matchedTarget && !(matchedTarget in columnMap)) {
+        columnMap[matchedTarget] = colIndex;
+        matchedFields.push(matchedTarget);
+      }
+    });
+
+    const matchCount = matchedFields.length;
+    if (matchCount >= 3 && matchCount > bestMatchCount) {
+      bestHeaderRowIndex = rowIndex;
+      bestMatchCount = matchCount;
+      bestColumnMap = columnMap;
+      bestMatchedFields = matchedFields;
+    }
+  });
+
+  const missingFields = TARGET_FIELDS.filter((field) => !bestMatchedFields.includes(field));
+  const fullyMatched = bestMatchedFields.length === TARGET_FIELDS.length;
+
+  if (bestHeaderRowIndex === -1) {
+    return {
+      sheetName,
+      matched: false,
+      fullyMatched: false,
+      headerRowNumber: null,
+      matchedFields: [],
+      missingFields: [...TARGET_FIELDS],
+      extractedRowCount: 0,
+      records: []
+    };
+  }
+
+  const records = extractRecordsFromSheet({
+    rows,
+    sheetName,
+    headerRowIndex: bestHeaderRowIndex,
+    columnMap: bestColumnMap
+  });
+
+  return {
+    sheetName,
+    matched: true,
+    fullyMatched,
+    headerRowNumber: bestHeaderRowIndex + 1,
+    matchedFields: bestMatchedFields,
+    missingFields,
+    extractedRowCount: records.length,
+    records
+  };
+}
+
+function extractRecordsFromSheet({ rows, sheetName, headerRowIndex, columnMap }) {
+  const records = [];
+
+  for (let rowIndex = headerRowIndex + 1; rowIndex < rows.length; rowIndex += 1) {
+    const rawRow = rows[rowIndex] || [];
+
+    const record = {
+      id: ${sheetName}__${rowIndex + 1},
+      sourceSheet: sheetName,
+      sourceRow: rowIndex + 1
+    };
+
+    TARGET_FIELDS.forEach((field) => {
+      const colIndex = columnMap[field];
+      const value = colIndex === undefined ? "" : cleanCellValue(rawRow[colIndex]);
+      record[field] = value || "Not found";
+    });
+
+    const allFieldsEmpty = TARGET_FIELDS.every((field) => {
+      const colIndex = columnMap[field];
+      if (colIndex === undefined) return true;
+      return !isMeaningfulValue(rawRow[colIndex]);
+    });
+
+    if (allFieldsEmpty) {
+      continue;
+    }
+
+    record.completeness = calculateCompleteness(record);
+    record.summaryText = getCardSummaryText(record);
+    records.push(record);
+  }
+
+  return records;
+}
+
+function calculateCompleteness(record) {
+  const foundCount = TARGET_FIELDS.filter((field) => record[field] !== "Not found").length;
+  return Math.round((foundCount / TARGET_FIELDS.length) * 100);
+}
+
+function getCardTitle(record) {
+  return record["Title"] === "Not found" ? "Untitled issue" : record["Title"];
+}
+
+function getCardSummaryText(record) {
+  const fallbackFields = [
+    "Issue Summary",
+    "Observations",
+    "Root Cause",
+    "Actions Taken"
+  ];
+
+  for (const field of fallbackFields) {
+    if (record[field] && record[field] !== "Not found") {
+      return record[field];
+    }
+  }
+
+  return "No summary text available for this record.";
+}
+
+function applyFiltersAndRender() {
+  const query = searchInput.value.trim().toLowerCase();
+  const selectedSheet = sheetFilter.value;
+
+  state.filteredRecords = state.allRecords.filter((record) => {
+    const matchesSheet = selectedSheet === "all" || record.sourceSheet === selectedSheet;
+    if (!matchesSheet) return false;
+
+    if (!query) return true;
+
+    const haystack = [
+      record.sourceSheet,
+      record.sourceRow,
+      ...TARGET_FIELDS.map((field) => record[field])
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    return haystack.includes(query);
+  });
+
+  if (
+    state.selectedRecordId &&
+    !state.filteredRecords.some((record) => record.id === state.selectedRecordId)
+  ) {
+    state.selectedRecordId = state.filteredRecords[0]?.id ?? null;
+  }
+
+  renderAll();
+}
+
+function renderAll() {
+  renderMetrics();
+  renderRecordCount();
+  renderResults();
+  renderDetailPanel();
+  renderSheetSummaries();
+  renderEmptyStates();
+  exportJsonBtn.disabled = state.filteredRecords.length === 0;
+}
+
+function renderMetrics() {
+  const avgCompleteness = calculateAverageCompleteness(state.allRecords);
+
+  metricSheetsScanned.textContent = String(state.totalSheetsScanned);
+  metricMatchedSheets.textContent = String(state.matchedSheetsCount);
+  metricRecordsExtracted.textContent = String(state.allRecords.length);
+  metricAvgCompleteness.textContent = ${avgCompleteness}%;
+}
+
+function calculateAverageCompleteness(records) {
+  if (!records.length) return 0;
+  const sum = records.reduce((acc, record) => acc + record.completeness, 0);
+  return Math.round(sum / records.length);
+}
+
+function renderRecordCount() {
+  const total = state.allRecords.length;
+  const filtered = state.filteredRecords.length;
+
+  if (!total) {
+    recordsCountText.textContent = "No extracted records yet.";
+    return;
+  }
+
+  if (filtered === total) {
+    recordsCountText.textContent = ${filtered} extracted record${filtered === 1 ? "" : "s"} shown.;
+    return;
+  }
+
+  recordsCountText.textContent = ${filtered} of ${total} extracted records shown.;
+}
+
+function renderResults() {
+  resultsList.innerHTML = "";
+
+  state.filteredRecords.forEach((record) => {
+    const activeClass = record.id === state.selectedRecordId ? "is-active" : "";
+
+    const article = document.createElement("article");
+    article.className = result-card ${activeClass};
+    article.tabIndex = 0;
+    article.setAttribute("role", "button");
+    article.setAttribute("aria-label", Open details for ${getCardTitle(record)});
+
+    article.innerHTML = `
+      <div class="result-topline">
+        <span class="pill">${escapeHtml(record.sourceSheet)}</span>
+        <span class="meta-chip">Row ${escapeHtml(record.sourceRow)}</span>
+        <span class="meta-chip">${escapeHtml(record.completeness)}% complete</span>
+      </div>
+
+      <h3 class="result-title">${escapeHtml(getCardTitle(record))}</h3>
+      <p class="result-summary">${escapeHtml(truncateText(record.summaryText, 210))}</p>
+
+      <div class="result-meta">
+        <span class="sheet-chip">${record["Root Cause"] !== "Not found" ? "Root Cause found" : "Root Cause missing"}</span>
+        <span class="sheet-chip">${record["Preventive Action"] !== "Not found" ? "Preventive Action found" : "Preventive Action missing"}</span>
+      </div>
+
+      <div class="completeness-bar" aria-hidden="true">
+        <div class="completeness-fill" style="width: ${record.completeness}%"></div>
+      </div>
+    `;
+
+    article.addEventListener("click", () => {
+      state.selectedRecordId = record.id;
+      renderResults();
+      renderDetailPanel();
+    });
+
+    article.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        state.selectedRecordId = record.id;
+        renderResults();
+        renderDetailPanel();
+      }
+    });
+
+    resultsList.appendChild(article);
+  });
+}
+
+function renderDetailPanel() {
+  const record = state.filteredRecords.find((item) => item.id === state.selectedRecordId)
+    || state.allRecords.find((item) => item.id === state.selectedRecordId);
+
+  if (!record) {
+    detailTitle.textContent = "Select a result card";
+    detailMeta.innerHTML = <span class="meta-chip">No record selected</span>;
+    detailFields.innerHTML = `
+      <div class="placeholder-detail">
+        Click any result card to inspect all extracted fields for that issue.
+      </div>
+    `;
+    copyRecordBtn.disabled = true;
+    return;
+  }
+
+  detailTitle.textContent = getCardTitle(record);
+  detailMeta.innerHTML = `
+    <span class="meta-chip">Sheet: ${escapeHtml(record.sourceSheet)}</span>
+    <span class="meta-chip">Source row: ${escapeHtml(record.sourceRow)}</span>
+    <span class="meta-chip">Completeness: ${escapeHtml(record.completeness)}%</span>
+  `;
+
+  detailFields.innerHTML = TARGET_FIELDS.map((field) => `
+    <article class="detail-entry">
+      <h4>${escapeHtml(field)}</h4>
+      <p>${escapeHtml(record[field])}</p>
+    </article>
+  `).join("");
+
+  copyRecordBtn.disabled = false;
+}
+
+function renderSheetSummaries() {
+  const matchedSheets = state.sheetSummaries.filter((sheet) => sheet.matched);
+  sheetSummaryCount.textContent = ${matchedSheets.length} matched sheet${matchedSheets.length === 1 ? "" : "s"};
+  sheetSummaryList.innerHTML = "";
+
+  sheetSummaryPanelEmpty.classList.toggle("hidden", matchedSheets.length > 0);
+
+  matchedSheets.forEach((sheet) => {
+    const statusText = sheet.fullyMatched ? "Full match" : "Partial match";
+
+    const article = document.createElement("article");
+    article.className = "sheet-card";
+    article.innerHTML = `
+      <h4>${escapeHtml(sheet.sheetName)}</h4>
+      <p><strong>Status:</strong> ${escapeHtml(statusText)}</p>
+      <p><strong>Header row:</strong> ${escapeHtml(sheet.headerRowNumber)}</p>
+      <p><strong>Extracted rows:</strong> ${escapeHtml(sheet.extractedRowCount)}</p>
+
+      <div class="sheet-chip-wrap">
+        ${sheet.matchedFields.map((field) => <span class="sheet-chip">${escapeHtml(field)}</span>).join("")}
+        ${sheet.missingFields.map((field) => <span class="sheet-chip missing">${escapeHtml(field)} missing</span>).join("")}
+      </div>
+    `;
+
+    sheetSummaryList.appendChild(article);
+  });
+}
+
+function renderEmptyStates() {
+  const hasAnyRecords = state.allRecords.length > 0;
+  const hasMatchedSheets = state.matchedSheetsCount > 0;
+  const hasFilteredResults = state.filteredRecords.length > 0;
+
+  preUploadEmptyState.classList.toggle("hidden", hasAnyRecords || hasMatchedSheets);
+  noMatchesEmptyState.classList.toggle("hidden", !(!hasMatchedSheets && state.totalSheetsScanned > 0));
+  noFilteredResultsState.classList.toggle("hidden", !(hasMatchedSheets && !hasFilteredResults));
+
+  if (!hasFilteredResults) {
+    resultsList.innerHTML = "";
+  }
+}
+
+function populateSheetFilterOptions() {
+  const currentValue = sheetFilter.value || "all";
+  const uniqueSheets = [...new Set(state.allRecords.map((record) => record.sourceSheet))];
+
+  sheetFilter.innerHTML = <option value="all">All sheets</option>;
+  uniqueSheets.forEach((sheetName) => {
+    const option = document.createElement("option");
+    option.value = sheetName;
+    option.textContent = sheetName;
+    sheetFilter.appendChild(option);
+  });
+
+  if (uniqueSheets.includes(currentValue)) {
+    sheetFilter.value = currentValue;
+  } else {
+    sheetFilter.value = "all";
+  }
+}
+
+function exportFilteredResultsAsJson() {
+  if (!state.filteredRecords.length) return;
+
+  const exportPayload = state.filteredRecords.map((record) => ({
+    sourceSheet: record.sourceSheet,
+    sourceRow: record.sourceRow,
+    completeness: record.completeness,
+    Title: record["Title"],
+    "Issue Summary": record["Issue Summary"],
+    Observations: record["Observations"],
+    "Actions Taken": record["Actions Taken"],
+    "Root Cause": record["Root Cause"],
+    "Preventive Action": record["Preventive Action"]
+  }));
+
+  const blob = new Blob([JSON.stringify(exportPayload, null, 2)], {
+    type: "application/json"
+  });
+
+  const safeBaseName = (state.workbookName || "issue-records").replace(/\.[^.]+$/, "");
+  const fileName = ${safeBaseName}-filtered-results.json;
+
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function copySelectedRecord() {
+  const record = state.filteredRecords.find((item) => item.id === state.selectedRecordId)
+    || state.allRecords.find((item) => item.id === state.selectedRecordId);
+
+  if (!record) return;
+
+  const copyPayload = {
+    sourceSheet: record.sourceSheet,
+    sourceRow: record.sourceRow,
+    completeness: record.completeness,
+    Title: record["Title"],
+    "Issue Summary": record["Issue Summary"],
+    Observations: record["Observations"],
+    "Actions Taken": record["Actions Taken"],
+    "Root Cause": record["Root Cause"],
+    "Preventive Action": record["Preventive Action"]
+  };
+
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(copyPayload, null, 2));
+    const originalText = copyRecordBtn.textContent;
+    copyRecordBtn.textContent = "Copied";
+    setTimeout(() => {
+      copyRecordBtn.textContent = originalText;
+    }, 1200);
+  } catch (error) {
+    console.error(error);
+    alert("Copy failed. Your browser may be blocking clipboard access.");
+  }
+}
+
+function truncateText(text, maxLength) {
+  if (!text || text.length <= maxLength) return text;
+  return ${text.slice(0, maxLength).trim()}...;
+}
+
+function resetDataState(clearMeta = true) {
+  state.allRecords = [];
+  state.filteredRecords = [];
+  state.sheetSummaries = [];
+  state.selectedRecordId = null;
+  state.totalSheetsScanned = 0;
+  state.matchedSheetsCount = 0;
+
+  if (clearMeta) {
+    state.workbookName = "";
+    state.workbookSize = 0;
+    fileMeta.textContent = "";
+  }
+}
+
+function setupRevealAnimations() {
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const revealElements = document.querySelectorAll(".reveal");
+
+  if (reduceMotion) {
+    revealElements.forEach((el) => el.classList.add("reveal-in"));
+    return;
+  }
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("reveal-in");
+          observer.unobserve(entry.target);
+        }
+      });
+    },
+    { threshold: 0.12 }
+  );
+
+  revealElements.forEach((el) => observer.observe(el));
+}
+
+function initialize() {
+  setupRevealAnimations();
+  renderAll();
+}
+
+initialize();
